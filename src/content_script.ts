@@ -178,6 +178,23 @@ function handleRemoteUpdate(message: Message): void {
 function handleServiceWorkerMessage(serviceWorkerMessage: Message) {
   switch (serviceWorkerMessage.type) {
     case MessageTypes.SW2CS_ROOM_CONNECTION:
+      // Send current video state back so service worker can connect the socket
+      if (g_player) {
+        const { state, currentProgress } = getStates();
+        g_port.postMessage({
+          type: MessageTypes.CS2SW_ROOM_CONNECTION,
+          state,
+          currentProgress,
+        });
+      } else {
+        // Player not ready yet, send default values
+        g_port.postMessage({
+          type: MessageTypes.CS2SW_ROOM_CONNECTION,
+          state: States.PAUSED,
+          currentProgress: 0,
+        });
+      }
+
       g_heartBeatInterval = setInterval(() => {
         try {
           g_port.postMessage({ type: MessageTypes.CS2SW_HEART_BEAT });
@@ -191,12 +208,21 @@ function handleServiceWorkerMessage(serviceWorkerMessage: Message) {
       if (g_heartBeatInterval) clearInterval(g_heartBeatInterval);
       break;
 
+    case MessageTypes.SW2CS_REMOTE_UPDATE:
+      handleRemoteUpdate(serviceWorkerMessage);
+      break;
+
     default:
       throw "Invalid service worker message type";
   }
 }
 
 function runContentScript(): void {
+  // Register message listener immediately so service worker can communicate
+  if (!g_port.onMessage.hasListener(handleServiceWorkerMessage)) {
+    g_port.onMessage.addListener(handleServiceWorkerMessage);
+  }
+
   g_player = document.getElementById("player0") as HTMLVideoElement;
 
   if (!g_player) {
@@ -207,8 +233,6 @@ function runContentScript(): void {
   for (const action of getEnumKeys(Actions)) {
     g_player.addEventListener(Actions[action], handleLocalAction(Actions[action]));
   }
-
-  g_port.onMessage.addListener(handleServiceWorkerMessage);
 }
 
 // ---------------- Styles ---------------- //

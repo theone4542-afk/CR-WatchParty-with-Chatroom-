@@ -67,8 +67,12 @@ function disconnectWebsocket(tabId: number): void {
 function handlePopupMessage(message: Message, port: chrome.runtime.Port): void {
   switch (message.type) {
     case MessageTypes.PU2SW_CREATE_ROOM:
-      sendConnectionRequestToContentScript(message.tabId);
-      break;
+  // Reset sentConnectionRequest so we can try again
+  if (tabsInfo[message.tabId]) {
+    tabsInfo[message.tabId]!.sentConnectionRequest = false;
+  }
+  sendConnectionRequestToContentScript(message.tabId);
+  break;
     case MessageTypes.PU2SW_DISCONNECT_ROOM:
       disconnectWebsocket(message.tabId);
       break;
