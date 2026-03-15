@@ -62,7 +62,12 @@ createRoomButton.onclick = async function (): Promise<void> {
   extensionAPI.tabs.query(
     { active: true, currentWindow: true },
     function (tabs: chrome.tabs.Tab[]): void {
+      if (!tabs || tabs.length === 0 || !tabs[0].id) {
+        log("No active tab found");
+        return;
+      }
       const tabId = tabs[0].id;
+      log("Creating room for tab", tabId);
       g_port.postMessage({ type: MessageTypes.PU2SW_CREATE_ROOM, tabId });
     }
   );
@@ -127,15 +132,15 @@ function renderConnectedPage() {
 
 function requestRoomId() {
   extensionAPI.tabs.query({ active: true, currentWindow: true }, function (tabs: chrome.tabs.Tab[]) {
-    const tab: chrome.tabs.Tab = tabs[0];
-    if (tab.id) {
-      g_port.postMessage({
-        type: MessageTypes.PU2SW_REQUEST_ROOM_ID,
-        tabId: tab.id,
-      });
-    } else {
+    if (!tabs || tabs.length === 0 || !tabs[0] || !tabs[0].id) {
       renderDisconnectedPage();
+      return;
     }
+    const tab: chrome.tabs.Tab = tabs[0];
+    g_port.postMessage({
+      type: MessageTypes.PU2SW_REQUEST_ROOM_ID,
+      tabId: tab.id!,
+    });
   });
 }
 
