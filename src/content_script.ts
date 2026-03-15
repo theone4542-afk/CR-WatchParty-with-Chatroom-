@@ -11,7 +11,7 @@ import {
 import { extensionAPI } from "./browser-compat";
 
 // ---------------- WebSocket ---------------- //
-const ws = new WebSocket("ws://localhost:3000");
+const ws = new WebSocket("wss://cr-watchparty-with-chatroom-production.up.railway.app");
 let currentRoom = "default-room";
 
 ws.onopen = () => {
