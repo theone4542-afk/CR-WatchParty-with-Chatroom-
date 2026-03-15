@@ -129,13 +129,14 @@ function sendUpdateToContentScript(
 function sendConnectionRequestToContentScript(tabId: number): void {
   const tabInfo = tabsInfo[tabId];
   log({ tabsInfo, tabInfo, tabId });
-  const port = tabInfo!.port!;
-  const tab = port.sender!.tab!;
 
   if (tabInfo == undefined) {
     log(`No tab info found for tab ${tabId}`);
-    return;
+    return; // This line exists but needs to come BEFORE accessing port
   }
+
+  const port = tabInfo!.port!;
+  const tab = port.sender!.tab!;
 
   if (tabInfo.sentConnectionRequest) {
     log("Connection request already sent to contentScript", { tab });
