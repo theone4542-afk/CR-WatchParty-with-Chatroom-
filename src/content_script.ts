@@ -89,7 +89,6 @@ const ignoreNext: { [index: string]: boolean } = {};
 let g_player: HTMLVideoElement | undefined = undefined;
 let g_lastFrameProgress: number | undefined = undefined;
 let g_heartBeatInterval: ReturnType<typeof setInterval> | undefined = undefined;
-let g_scriptInitialized = false;
 
 function getState(stateName: PlayerStateProp): boolean | number {
   return (g_player as any)[stateName];
@@ -111,9 +110,9 @@ function getStates(): { state: States; currentProgress: number; timeJump: boolea
 
 const handleLocalAction = (action: Actions) => (): void => {
   if (ignoreNext[action]) {
-    ignoreNext[action] = false;
     return;
   }
+  // rest stays the same
 
   const { state, currentProgress, timeJump } = getStates();
   const type = MessageTypes.CS2SW_LOCAL_UPDATE;
@@ -137,6 +136,7 @@ function triggerAction(action: Actions, progress: number): void {
 
   const player = g_player as HTMLVideoElement;
   ignoreNext[action] = true;
+  setTimeout(() => { ignoreNext[action] = false; }, 1000);
 
   switch (action) {
     case Actions.PAUSE:
@@ -163,7 +163,6 @@ function handleRemoteUpdate(message: Message): void {
 
   const { roomState, roomProgress } = message;
 
-  // If player isn't ready yet, retry after a short delay
   if (!g_player) {
     setTimeout(() => handleRemoteUpdate(message), 500);
     return;
@@ -171,21 +170,20 @@ function handleRemoteUpdate(message: Message): void {
 
   const { state, currentProgress } = getStates();
 
+  // Always sync position first, then state
+  if (Math.abs(roomProgress - currentProgress) > LIMIT_DELTA_TIME) {
+    triggerAction(Actions.TIME_UPDATE, roomProgress);
+  }
+
   if (state !== roomState) {
     if (roomState === States.PAUSED) triggerAction(Actions.PAUSE, roomProgress);
     if (roomState === States.PLAYING) triggerAction(Actions.PLAY, roomProgress);
-  }
-
-  // Always sync position on join regardless of LIMIT_DELTA_TIME
-  if (Math.abs(roomProgress - currentProgress) > LIMIT_DELTA_TIME) {
-    triggerAction(Actions.TIME_UPDATE, roomProgress);
   }
 }
 
 function handleServiceWorkerMessage(serviceWorkerMessage: Message) {
   switch (serviceWorkerMessage.type) {
     case MessageTypes.SW2CS_ROOM_CONNECTION:
-      // Send current video state back so service worker can connect the socket
       if (g_player) {
         const { state, currentProgress } = getStates();
         g_port.postMessage({
@@ -194,7 +192,6 @@ function handleServiceWorkerMessage(serviceWorkerMessage: Message) {
           currentProgress,
         });
       } else {
-        // Player not ready yet, send default values
         g_port.postMessage({
           type: MessageTypes.CS2SW_ROOM_CONNECTION,
           state: States.PAUSED,
@@ -202,6 +199,7 @@ function handleServiceWorkerMessage(serviceWorkerMessage: Message) {
         });
       }
 
+      if (g_heartBeatInterval) clearInterval(g_heartBeatInterval);
       g_heartBeatInterval = setInterval(() => {
         try {
           g_port.postMessage({ type: MessageTypes.CS2SW_HEART_BEAT });
@@ -224,20 +222,24 @@ function handleServiceWorkerMessage(serviceWorkerMessage: Message) {
   }
 }
 
+let g_playerListenersAttached = false;
+
 function runContentScript(): void {
   if (!g_port.onMessage.hasListener(handleServiceWorkerMessage)) {
     g_port.onMessage.addListener(handleServiceWorkerMessage);
   }
 
-  g_player = document.getElementById("player0") as HTMLVideoElement;
+  const player = document.getElementById("player0") as HTMLVideoElement;
 
-  if (!g_player) {
+  if (!player) {
     setTimeout(runContentScript, 500);
     return;
   }
 
-  if (!g_scriptInitialized) {
-    g_scriptInitialized = true;
+  // Only attach listeners if player is new or listeners not yet attached
+  if (!g_playerListenersAttached || g_player !== player) {
+    g_player = player;
+    g_playerListenersAttached = true;
     for (const action of getEnumKeys(Actions)) {
       g_player.addEventListener(Actions[action], handleLocalAction(Actions[action]));
     }
@@ -403,7 +405,6 @@ style.textContent = `
 input:checked + .slider { background: #ff640a; }
 input:checked + .slider:before { transform: translateX(16px); }
 
-/* Normal mode overlay — messages float bottom right of viewport */
 .overlay-mode #chat-messages {
   position: fixed;
   right: 20px;
@@ -419,7 +420,6 @@ input:checked + .slider:before { transform: translateX(16px); }
   padding: 0;
 }
 
-/* Shared overlay message style — same in both normal and fullscreen */
 .overlay-msg {
   background: rgba(0,0,0,0.55);
   padding: 4px 10px;
@@ -559,7 +559,6 @@ input:checked + .slider:before { transform: translateX(16px); }
 
 #chat-send-fs:hover { background: #ff7a2b; }
 
-/* Fullscreen overlay: messages float bottom right inside fullscreen element */
 #chat-messages-fs.fs-overlay-mode {
   position: absolute;
   bottom: 80px;
@@ -719,10 +718,11 @@ function watchFullscreen(chatBox: HTMLElement): void {
     fsIcon.addEventListener("click", showPanel);
 
     fsChat.addEventListener("mouseenter", () => {
-  clearTimeout(fsHideTimer);
+      clearTimeout(fsHideTimer);
     });
-fsChat.addEventListener("mouseleave", () => {
-  resetHideTimer();
+
+    fsChat.addEventListener("mouseleave", () => {
+      resetHideTimer();
     });
 
     fsOverlay.addEventListener("change", () => {
@@ -732,7 +732,6 @@ fsChat.addEventListener("mouseleave", () => {
       if (fsOverlayActive) {
         fsMsgs.classList.add("fs-overlay-mode");
         fsEl.appendChild(fsMsgs);
-        // Keep compact bar visible — no hide timer in overlay mode
         fsChat.style.opacity = "1";
         fsChat.style.pointerEvents = "all";
         fsIcon.style.display = "none";
@@ -744,13 +743,12 @@ fsChat.addEventListener("mouseleave", () => {
         fsChat.style.opacity = "1";
         fsChat.style.pointerEvents = "all";
         fsIcon.style.display = "none";
-  // Restore all faded messages
-  fsMsgs.querySelectorAll(".overlay-msg").forEach((msg) => {
-    (msg as HTMLElement).style.opacity = "1";
-    msg.classList.remove("overlay-msg");
-  });
-  resetHideTimer();
-}
+        fsMsgs.querySelectorAll(".overlay-msg").forEach((msg) => {
+          (msg as HTMLElement).style.opacity = "1";
+          msg.classList.remove("overlay-msg");
+        });
+        resetHideTimer();
+      }
     });
 
     function sendFromFs() {
@@ -862,16 +860,14 @@ function attachChatEvents(chatBox: HTMLElement, icon: HTMLElement): void {
   document.addEventListener("mouseup", () => { isDragging = false; });
 
   overlayToggle.addEventListener("change", () => {
-  chatBox.classList.toggle("overlay-mode");
-  // When turning overlay OFF, restore all faded messages
-  if (!overlayToggle.checked) {
-    const messages = chatBox.querySelectorAll(".overlay-msg");
-    messages.forEach((msg) => {
-      (msg as HTMLElement).style.opacity = "1";
-      msg.classList.remove("overlay-msg");
-    });
-  }
-});
+    chatBox.classList.toggle("overlay-mode");
+    if (!overlayToggle.checked) {
+      chatBox.querySelectorAll(".overlay-msg").forEach((msg) => {
+        (msg as HTMLElement).style.opacity = "1";
+        msg.classList.remove("overlay-msg");
+      });
+    }
+  });
 
   const panel = chatBox.querySelector("#chat-panel") as HTMLElement;
   let hideTimer: ReturnType<typeof setTimeout>;

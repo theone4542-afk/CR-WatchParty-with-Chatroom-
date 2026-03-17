@@ -17,8 +17,11 @@ function handleContentScriptConnection(port: chrome.runtime.Port): void {
   const tabId = port.sender?.tab?.id!;
   const url = port.sender?.tab?.url!;
 
+  // Always update port reference in case of reconnection
   if (_.isNil(tabsInfo[tabId])) {
     tabsInfo[tabId] = { port, tabId, sentConnectionRequest: false };
+  } else {
+    tabsInfo[tabId]!.port = port;
   }
 
   const urlRoomId: string | null = getParameterByName(url, "rollTogetherRoom");
@@ -67,12 +70,11 @@ function disconnectWebsocket(tabId: number): void {
 function handlePopupMessage(message: Message, port: chrome.runtime.Port): void {
   switch (message.type) {
     case MessageTypes.PU2SW_CREATE_ROOM:
-  // Reset sentConnectionRequest so we can try again
-  if (tabsInfo[message.tabId]) {
-    tabsInfo[message.tabId]!.sentConnectionRequest = false;
-  }
-  sendConnectionRequestToContentScript(message.tabId);
-  break;
+      if (tabsInfo[message.tabId]) {
+        tabsInfo[message.tabId]!.sentConnectionRequest = false;
+      }
+      sendConnectionRequestToContentScript(message.tabId);
+      break;
     case MessageTypes.PU2SW_DISCONNECT_ROOM:
       disconnectWebsocket(message.tabId);
       break;
@@ -104,11 +106,14 @@ function handleContentScriptMessage(
       );
       break;
     case MessageTypes.CS2SW_LOCAL_UPDATE:
-      tabsInfo[tabId]?.socket?.emit(
-        "update",
-        message.state,
-        message.currentProgress
-      );
+      // Only emit to socket if we have one — prevents updates from non-room tabs
+      if (tabsInfo[tabId]?.socket) {
+        tabsInfo[tabId]?.socket?.emit(
+          "update",
+          message.state,
+          message.currentProgress
+        );
+      }
       break;
     default:
       throw "Invalid ContentScriptMessageType " + message.type;
@@ -136,10 +141,10 @@ function sendConnectionRequestToContentScript(tabId: number): void {
 
   if (tabInfo == undefined) {
     log(`No tab info found for tab ${tabId}`);
-    return; // This line exists but needs to come BEFORE accessing port
+    return;
   }
 
-  const port = tabInfo!.port!;
+  const port = tabInfo.port;
   const tab = port.sender!.tab!;
 
   if (tabInfo.sentConnectionRequest) {
@@ -169,12 +174,8 @@ function connectWebsocket(
   videoState: States,
   urlRoomId: string | null
 ) {
-  log("Connecting websocket", {
-    tabId,
-    videoProgress,
-    videoState,
-    urlRoomId,
-  });
+  log("Connecting websocket", { tabId, videoProgress, videoState, urlRoomId });
+
   const tabInfo = tabsInfo[tabId];
   if (!tabInfo) {
     log(`No tab info found for tab ${tabId}`);
@@ -182,9 +183,7 @@ function connectWebsocket(
   }
 
   if (tabInfo.socket) {
-    log(
-      `Socket is already configured for tab ${tabId}. Disconnect existing connection before attempting to connect.`
-    );
+    log(`Socket already configured for tab ${tabId}.`);
     return;
   }
 
@@ -193,6 +192,7 @@ function connectWebsocket(
   )}&videoState=${videoState}${urlRoomId ? `&room=${urlRoomId}` : ""}`;
 
   tabInfo.socket = io(serverUrl, { query, transports: ["websocket"] });
+
   tabInfo.socket.on(
     "join",
     (receivedRoomId: string, roomState: States, roomProgress: number): void => {
@@ -205,7 +205,6 @@ function connectWebsocket(
       tryUpdatePopup(tabInfo.roomId);
       getActionAPI().enable(tabId);
       tabInfo.sentConnectionRequest = false;
-
       sendUpdateToContentScript(tabId, roomState, roomProgress);
     }
   );
@@ -225,24 +224,23 @@ extensionAPI.runtime.onConnect.addListener(function (port: chrome.runtime.Port) 
     case PortName.POPUP:
       popupPort = port;
       log("Popup connected");
-
       port.onDisconnect.addListener(() => {
         popupPort = undefined;
         log("Popup disconnected");
       });
       port.onMessage.addListener(handlePopupMessage);
       break;
+
     case PortName.CONTENT_SCRIPT:
       handleContentScriptConnection(port);
       log(`${port.name} connected`, port.sender?.tab?.id);
-
       port.onDisconnect.addListener(() => {
         handleContentScriptDisconnection(port);
         log(`${port.name} disconnected`, port.sender?.tab?.id);
       });
-
       port.onMessage.addListener(handleContentScriptMessage);
       break;
+
     default:
       throw "Invalid PortName " + port.name;
   }
