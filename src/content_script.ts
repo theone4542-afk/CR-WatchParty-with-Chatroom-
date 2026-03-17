@@ -561,7 +561,7 @@ input:checked + .slider:before { transform: translateX(16px); }
 
 #chat-messages-fs.fs-overlay-mode {
   position: absolute;
-  bottom: 80px;
+  bottom: 160px;
   right: 20px;
   left: auto;
   top: auto;
@@ -722,8 +722,18 @@ function watchFullscreen(chatBox: HTMLElement): void {
     });
 
     fsChat.addEventListener("mouseleave", () => {
-      resetHideTimer();
-    });
+  // Don't hide if user is typing in input
+  if (document.activeElement === fsInput) return;
+  resetHideTimer();
+});
+
+fsInput.addEventListener("focus", () => {
+  clearTimeout(fsHideTimer);
+});
+
+fsInput.addEventListener("blur", () => {
+  resetHideTimer();
+});
 
     fsOverlay.addEventListener("change", () => {
       clearTimeout(fsHideTimer);
@@ -737,18 +747,20 @@ function watchFullscreen(chatBox: HTMLElement): void {
         fsIcon.style.display = "none";
         resetHideTimer();
       } else {
-        fsMsgs.classList.remove("fs-overlay-mode");
-        fsPanelEl.insertBefore(fsMsgs, fsInputArea);
-        fsPanelEl.style.display = "flex";
-        fsChat.style.opacity = "1";
-        fsChat.style.pointerEvents = "all";
-        fsIcon.style.display = "none";
-        fsMsgs.querySelectorAll(".overlay-msg").forEach((msg) => {
-          (msg as HTMLElement).style.opacity = "1";
-          msg.classList.remove("overlay-msg");
-        });
-        resetHideTimer();
-      }
+  fsMsgs.classList.remove("fs-overlay-mode");
+  fsPanelEl.insertBefore(fsMsgs, fsInputArea);
+  fsPanelEl.style.display = "flex";
+  fsPanelEl.style.height = "";
+  fsPanelEl.style.maxHeight = "";
+  fsChat.style.opacity = "1";
+  fsChat.style.pointerEvents = "all";
+  fsIcon.style.display = "none";
+  fsMsgs.querySelectorAll(".overlay-msg").forEach((msg) => {
+    (msg as HTMLElement).style.opacity = "1";
+    msg.classList.remove("overlay-msg");
+  });
+  resetHideTimer();
+}
     });
 
     function sendFromFs() {
