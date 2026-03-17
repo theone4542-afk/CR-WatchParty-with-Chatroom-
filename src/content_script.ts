@@ -84,7 +84,19 @@ ws.onerror = (err) => console.error("WebSocket error:", err);
 ws.onclose = () => console.log("Disconnected from chat server");
 
 // ---------------- Video Sync ---------------- //
-const g_port = extensionAPI.runtime.connect({ name: PortName.CONTENT_SCRIPT });
+// ---------------- Video Sync ---------------- //
+let g_port = extensionAPI.runtime.connect({ name: PortName.CONTENT_SCRIPT });
+
+g_port.onDisconnect.addListener(() => {
+  console.log("Port disconnected, reconnecting...");
+  try {
+    g_port = extensionAPI.runtime.connect({ name: PortName.CONTENT_SCRIPT });
+    g_port.onMessage.addListener(handleServiceWorkerMessage);
+  } catch(e) {
+    console.log("Reconnect failed:", e);
+  }
+});
+
 const ignoreNext: { [index: string]: boolean } = {};
 let g_player: HTMLVideoElement | undefined = undefined;
 let g_lastFrameProgress: number | undefined = undefined;
