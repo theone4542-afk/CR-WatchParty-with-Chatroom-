@@ -84,7 +84,6 @@ ws.onerror = (err) => console.error("WebSocket error:", err);
 ws.onclose = () => console.log("Disconnected from chat server");
 
 // ---------------- Video Sync ---------------- //
-// ---------------- Video Sync ---------------- //
 let g_port = extensionAPI.runtime.connect({ name: PortName.CONTENT_SCRIPT });
 
 g_port.onDisconnect.addListener(() => {
@@ -124,7 +123,6 @@ const handleLocalAction = (action: Actions) => (): void => {
   if (ignoreNext[action]) {
     return;
   }
-  // rest stays the same
 
   const { state, currentProgress, timeJump } = getStates();
   const type = MessageTypes.CS2SW_LOCAL_UPDATE;
@@ -134,11 +132,11 @@ const handleLocalAction = (action: Actions) => (): void => {
   switch (action) {
     case Actions.PLAY:
     case Actions.PAUSE:
-      g_port.postMessage({ type, state, currentProgress });
+      try { g_port.postMessage({ type, state, currentProgress }); } catch(e) {}
       break;
 
     case Actions.TIME_UPDATE:
-      if (timeJump) g_port.postMessage({ type, state, currentProgress });
+      if (timeJump) try { g_port.postMessage({ type, state, currentProgress }); } catch(e) {}
       break;
   }
 };
@@ -182,7 +180,6 @@ function handleRemoteUpdate(message: Message): void {
 
   const { state, currentProgress } = getStates();
 
-  // Always sync position first, then state
   if (Math.abs(roomProgress - currentProgress) > LIMIT_DELTA_TIME) {
     triggerAction(Actions.TIME_UPDATE, roomProgress);
   }
@@ -248,7 +245,6 @@ function runContentScript(): void {
     return;
   }
 
-  // Only attach listeners if player is new or listeners not yet attached
   if (!g_playerListenersAttached || g_player !== player) {
     g_player = player;
     g_playerListenersAttached = true;
@@ -597,7 +593,10 @@ document.head.appendChild(style);
 
 function createChatBoxIfVideoExists(): void {
   const player = document.getElementById("player0") as HTMLVideoElement;
-  if (!player) return;
+  if (!player) {
+    setTimeout(createChatBoxIfVideoExists, 500);
+    return;
+  }
 
   if (document.getElementById("watch-chat")) return;
 
@@ -734,18 +733,17 @@ function watchFullscreen(chatBox: HTMLElement): void {
     });
 
     fsChat.addEventListener("mouseleave", () => {
-  // Don't hide if user is typing in input
-  if (document.activeElement === fsInput) return;
-  resetHideTimer();
-});
+      if (document.activeElement === fsInput) return;
+      resetHideTimer();
+    });
 
-fsInput.addEventListener("focus", () => {
-  clearTimeout(fsHideTimer);
-});
+    fsInput.addEventListener("focus", () => {
+      clearTimeout(fsHideTimer);
+    });
 
-fsInput.addEventListener("blur", () => {
-  resetHideTimer();
-});
+    fsInput.addEventListener("blur", () => {
+      resetHideTimer();
+    });
 
     fsOverlay.addEventListener("change", () => {
       clearTimeout(fsHideTimer);
@@ -759,20 +757,20 @@ fsInput.addEventListener("blur", () => {
         fsIcon.style.display = "none";
         resetHideTimer();
       } else {
-  fsMsgs.classList.remove("fs-overlay-mode");
-  fsPanelEl.insertBefore(fsMsgs, fsInputArea);
-  fsPanelEl.style.display = "flex";
-  fsPanelEl.style.height = "";
-  fsPanelEl.style.maxHeight = "";
-  fsChat.style.opacity = "1";
-  fsChat.style.pointerEvents = "all";
-  fsIcon.style.display = "none";
-  fsMsgs.querySelectorAll(".overlay-msg").forEach((msg) => {
-    (msg as HTMLElement).style.opacity = "1";
-    msg.classList.remove("overlay-msg");
-  });
-  resetHideTimer();
-}
+        fsMsgs.classList.remove("fs-overlay-mode");
+        fsPanelEl.insertBefore(fsMsgs, fsInputArea);
+        fsPanelEl.style.display = "flex";
+        fsPanelEl.style.height = "";
+        fsPanelEl.style.maxHeight = "";
+        fsChat.style.opacity = "1";
+        fsChat.style.pointerEvents = "all";
+        fsIcon.style.display = "none";
+        fsMsgs.querySelectorAll(".overlay-msg").forEach((msg) => {
+          (msg as HTMLElement).style.opacity = "1";
+          msg.classList.remove("overlay-msg");
+        });
+        resetHideTimer();
+      }
     });
 
     function sendFromFs() {
@@ -784,11 +782,13 @@ fsInput.addEventListener("blur", () => {
         appendMessage(username, text);
       }
       fsInput.value = "";
+      fsInput.blur();
       resetHideTimer();
     }
 
     fsSendBtn.addEventListener("click", sendFromFs);
     fsInput.addEventListener("keydown", (e) => {
+      e.stopPropagation();
       if (e.key === "Enter") sendFromFs();
     });
 
@@ -845,6 +845,10 @@ function attachChatEvents(chatBox: HTMLElement, icon: HTMLElement): void {
     }
   });
 
+  usernameInput.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+  });
+
   function sendMessage() {
     const username = chatBox.dataset.username;
     if (!username || !input.value.trim()) return;
@@ -854,10 +858,12 @@ function attachChatEvents(chatBox: HTMLElement, icon: HTMLElement): void {
       appendMessage(username, text);
     }
     input.value = "";
+    input.blur();
   }
 
   sendButton.addEventListener("click", sendMessage);
   input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
     if (e.key === "Enter") sendMessage();
   });
 
