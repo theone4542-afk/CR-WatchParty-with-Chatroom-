@@ -18,12 +18,146 @@ ws.onopen = () => {
   console.log("Connected to Horai chat server");
 };
 
+// ---------------- Key Lock State ---------------- //
+// When true, all keyboard events are captured by the chat and NOT passed to Crunchyroll.
+let g_keyLockEnabled = false;
+
+// Global reference to sendMessage — set by attachChatEvents so the
+// global keydown interceptor can call it directly when Enter is pressed
+// while the panel is faded and input isn't yet focused.
+let g_sendMessage: (() => void) | null = null;
+document.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (!g_keyLockEnabled) return;
+
+  const chatBox = document.getElementById("watch-chat");
+  if (!chatBox) return;
+
+  const chatInput = document.getElementById("chat-input") as HTMLInputElement | null;
+  const inputFocused = chatInput && document.activeElement === chatInput;
+
+  // Input already focused — block Crunchyroll's bubble-phase listeners
+  // but do NOT stopImmediatePropagation — the input's own capture listener
+  // needs to fire next to handle Enter → sendMessage.
+  if (inputFocused) {
+    if (e.key === "Enter") {
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      if (g_sendMessage) g_sendMessage();
+      return;
+    }
+    e.stopPropagation();
+    return;
+  }
+
+  // Reveal if panel-hidden (icon mode) — but NOT if just faded by hide timer
+  if (chatBox.classList.contains("panel-hidden")) {
+    chatBox.classList.remove("panel-hidden");
+  }
+
+  // Route all keys to input silently without revealing the panel.
+  // For Enter: call sendMessage directly since input may not be truly focused yet.
+  if (chatInput && !chatBox.classList.contains("overlay-mode")) {
+    if (e.key === "Enter") {
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      chatInput.focus();
+      // Call sendMessage directly — don't rely on input's keydown listener
+      // since activeElement may not be the input yet at this point.
+      if (g_sendMessage) g_sendMessage();
+      return;
+    }
+    chatInput.focus();
+  }
+
+  e.stopImmediatePropagation();
+}, true);
+
+// Independent Shift key listener — reveals chatbox panel regardless of any mode.
+// Works in normal mode, fullscreen, with or without Chat Focus.
+document.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (e.key !== "Shift") return;
+
+  // Reveal normal panel if faded and focus its input
+  const panel = document.getElementById("watch-chat")?.querySelector("#chat-panel") as HTMLElement | null;
+  if (panel && panel.style.opacity === "0") {
+    panel.style.opacity = "1";
+    panel.style.pointerEvents = "all";
+    const chatInput = document.getElementById("chat-input") as HTMLInputElement | null;
+    if (chatInput) chatInput.focus();
+  }
+
+  // Reveal fullscreen panel if faded and focus its input
+  const fsChat = document.getElementById("watch-chat-fs") as HTMLElement | null;
+  if (fsChat && fsChat.style.opacity === "0") {
+    fsChat.style.opacity = "1";
+    fsChat.style.pointerEvents = "all";
+    document.getElementById("chat-icon-fs")?.style.setProperty("display", "none");
+    const fsInput = document.getElementById("chat-input-fs") as HTMLInputElement | null;
+    if (fsInput) fsInput.focus();
+  }
+}, true);
+
+// ---------------- Overlay message helpers ---------------- //
+const MAX_OVERLAY_MESSAGES = 5;
+
+// Map to track scheduled fade timers for overlay messages so we can cancel them
+const g_fadeTimers = new WeakMap<HTMLElement, ReturnType<typeof setTimeout>[]>();
+
+function pruneOverlayMessages(container: HTMLElement): void {
+  const msgs = Array.from(container.querySelectorAll(".overlay-msg:not(.overlay-hidden)"));
+  const visible = msgs.filter(m => (m as HTMLElement).style.opacity !== "0");
+  if (visible.length > MAX_OVERLAY_MESSAGES) {
+    const toHide = visible.slice(0, visible.length - MAX_OVERLAY_MESSAGES);
+    toHide.forEach((m) => { (m as HTMLElement).style.opacity = "0"; });
+  }
+}
+
+// Schedule a message to fade to opacity 0 after 5s — never removed from DOM
+// so it can be restored when overlay is turned off.
+function scheduleOverlayFade(div: HTMLElement): void {
+  const t1 = setTimeout(() => {
+    div.style.opacity = "0";
+  }, 5000);
+  g_fadeTimers.set(div, [t1]);
+}
+
+// Cancel fade timer and restore a message to normal visible state
+function cancelOverlayFade(el: HTMLElement): void {
+  const timers = g_fadeTimers.get(el);
+  if (timers) timers.forEach(clearTimeout);
+  g_fadeTimers.delete(el);
+  el.style.opacity = "1";
+  el.classList.remove("overlay-msg");
+}
+
+// Convert ALL existing messages in container to overlay-disappearing style.
+function convertExistingToOverlay(container: HTMLElement): void {
+  Array.from(container.querySelectorAll(".chat-msg, .system-msg")).forEach((msg) => {
+    const el = msg as HTMLElement;
+    if (!el.classList.contains("overlay-msg")) {
+      el.classList.add("overlay-msg");
+      scheduleOverlayFade(el);
+    }
+  });
+  pruneOverlayMessages(container);
+}
+
+// Restore all overlay messages back to normal (cancel timers, reset opacity)
+function restoreOverlayMessages(container: HTMLElement): void {
+  Array.from(container.querySelectorAll(".overlay-msg")).forEach((msg) => {
+    cancelOverlayFade(msg as HTMLElement);
+  });
+}
+
 function appendMessage(username: string | null, text: string, isSystem = false): void {
   const inFullscreen = !!document.fullscreenElement;
   const fsMsgs = document.getElementById("chat-messages-fs");
+  const normalMsgs = document.getElementById("chat-messages");
 
-  const containers = [
-    document.getElementById("chat-messages"),
+  // Always append to normal messages container (persists across fullscreen transitions)
+  // Also append to fullscreen container when in fullscreen
+  const containers: (HTMLElement | null)[] = [
+    normalMsgs,
     inFullscreen ? fsMsgs : null,
   ];
 
@@ -49,17 +183,16 @@ function appendMessage(username: string | null, text: string, isSystem = false):
     messages.appendChild(div);
     messages.scrollTop = messages.scrollHeight;
 
-    if (!inFullscreen) {
-      const chatBox = document.getElementById("watch-chat");
-      if (chatBox?.classList.contains("overlay-mode")) {
-        div.classList.add("overlay-msg");
-        setTimeout(() => (div.style.opacity = "0"), 4000);
-      }
-    } else {
-      if (fsMsgs?.classList.contains("fs-overlay-mode")) {
-        div.classList.add("overlay-msg");
-        setTimeout(() => (div.style.opacity = "0"), 4000);
-      }
+    // Apply overlay fade if relevant container is in overlay mode
+    const chatBox = document.getElementById("watch-chat");
+    if (messages === normalMsgs && chatBox?.classList.contains("overlay-mode")) {
+      div.classList.add("overlay-msg");
+      pruneOverlayMessages(messages);
+      scheduleOverlayFade(div);
+    } else if (messages === fsMsgs && fsMsgs?.classList.contains("fs-overlay-mode")) {
+      div.classList.add("overlay-msg");
+      pruneOverlayMessages(fsMsgs);
+      scheduleOverlayFade(div);
     }
   });
 }
@@ -82,6 +215,27 @@ ws.onmessage = (event) => {
 
 ws.onerror = (err) => console.error("WebSocket error:", err);
 ws.onclose = () => console.log("Disconnected from chat server");
+
+// ---------------- Video Action Chat Notifications ---------------- //
+// Notify the chat when someone plays, pauses, or seeks.
+// "local" = this user did it. "remote" = someone else in the room did it.
+
+function formatTime(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function notifyVideoAction(action: "play" | "pause" | "seek", progress: number, isRemote: boolean): void {
+  const chatBox = document.getElementById("watch-chat");
+  const username = isRemote ? "Someone" : (chatBox?.dataset.username || "You");
+  const time = formatTime(progress);
+  let text = "";
+  if (action === "play")  text = `▶ ${username} resumed at ${time}`;
+  if (action === "pause") text = `⏸ ${username} paused at ${time}`;
+  if (action === "seek")  text = `⏩ ${username} jumped to ${time}`;
+  if (text) appendMessage(null, text, true);
+}
 
 // ---------------- Video Sync ---------------- //
 let g_port = extensionAPI.runtime.connect({ name: PortName.CONTENT_SCRIPT });
@@ -133,10 +287,14 @@ const handleLocalAction = (action: Actions) => (): void => {
     case Actions.PLAY:
     case Actions.PAUSE:
       try { g_port.postMessage({ type, state, currentProgress }); } catch(e) {}
+      notifyVideoAction(action === Actions.PLAY ? "play" : "pause", currentProgress, false);
       break;
 
     case Actions.TIME_UPDATE:
-      if (timeJump) try { g_port.postMessage({ type, state, currentProgress }); } catch(e) {}
+      if (timeJump) {
+        try { g_port.postMessage({ type, state, currentProgress }); } catch(e) {}
+        notifyVideoAction("seek", currentProgress, false);
+      }
       break;
   }
 };
@@ -182,11 +340,18 @@ function handleRemoteUpdate(message: Message): void {
 
   if (Math.abs(roomProgress - currentProgress) > LIMIT_DELTA_TIME) {
     triggerAction(Actions.TIME_UPDATE, roomProgress);
+    notifyVideoAction("seek", roomProgress, true);
   }
 
   if (state !== roomState) {
-    if (roomState === States.PAUSED) triggerAction(Actions.PAUSE, roomProgress);
-    if (roomState === States.PLAYING) triggerAction(Actions.PLAY, roomProgress);
+    if (roomState === States.PAUSED) {
+      triggerAction(Actions.PAUSE, roomProgress);
+      notifyVideoAction("pause", roomProgress, true);
+    }
+    if (roomState === States.PLAYING) {
+      triggerAction(Actions.PLAY, roomProgress);
+      notifyVideoAction("play", roomProgress, true);
+    }
   }
 }
 
@@ -260,9 +425,9 @@ const style = document.createElement("style");
 style.textContent = `
 #watch-chat {
   position: fixed;
-  left: calc(100vw - 300px);
+  left: calc(100vw - 320px);
   top: 120px;
-  width: 260px;
+  width: 290px;
   z-index: 2147483647;
 }
 
@@ -296,8 +461,13 @@ style.textContent = `
   font-family: sans-serif;
   box-shadow: 0 0 10px rgba(0,0,0,0.5);
   transition: opacity 0.4s ease;
-  overflow: hidden;
+  overflow: visible;
 }
+
+/* Clip inner sections so the panel still looks rounded */
+#chat-header { border-radius: 10px 10px 0 0; overflow: hidden; }
+#chat-messages { border-radius: 0; }
+#chat-input-area { border-radius: 0 0 10px 10px; overflow: hidden; }
 
 #watch-chat.panel-hidden #chat-panel { display: none; }
 
@@ -309,17 +479,65 @@ style.textContent = `
   justify-content: space-between;
   cursor: move;
   user-select: none;
+  gap: 8px;
 }
 
-#chat-title { color: #ff640a; font-weight: bold; }
+#chat-title { color: #ff640a; font-weight: bold; flex-shrink: 0; }
 
-#overlay-control {
+#chat-header-controls {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
+  flex-wrap: nowrap;
 }
 
-#overlay-label { color: #ff640a; font-size: 13px; }
+#overlay-control, #keylock-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+#overlay-label, #keylock-label {
+  color: #ff640a;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Fix 5: Tooltip on hover over the Keys toggle area */
+#keylock-control {
+  position: relative;
+  cursor: default;
+}
+
+#keylock-tooltip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  background: #333;
+  color: #fff;
+  font-size: 11px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  pointer-events: none;
+  z-index: 2147483647;
+}
+
+#keylock-tooltip::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  right: 10px;
+  border: 5px solid transparent;
+  border-top-color: #333;
+}
+
+#keylock-control:hover #keylock-tooltip {
+  display: block;
+}
 
 #chat-messages {
   overflow-y: auto;
@@ -413,34 +631,40 @@ style.textContent = `
 input:checked + .slider { background: #ff640a; }
 input:checked + .slider:before { transform: translateX(16px); }
 
+/* ---- Fix 5: Overlay messages bigger and higher up ---- */
 .overlay-mode #chat-messages {
   position: fixed;
   right: 20px;
-  bottom: 140px;
-  width: 280px;
+  bottom: 200px;
+  width: 320px;
   pointer-events: none;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  max-height: 200px;
+  max-height: 210px;
   overflow: hidden;
   background: transparent;
   padding: 0;
+  gap: 6px;
+  justify-content: flex-end;
 }
 
 .overlay-msg {
-  background: rgba(0,0,0,0.55);
-  padding: 4px 10px;
-  margin: 3px 0;
+  background: rgba(0,0,0,0.6);
+  padding: 5px 12px;
+  margin: 0;
   border-radius: 6px;
   width: fit-content;
-  font-size: 14px;
+  max-width: 310px;
+  font-size: 15px;
   font-family: sans-serif;
   color: #fff;
   transition: opacity 1s ease;
-  max-width: 280px;
   word-break: break-word;
   text-align: right;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  line-height: 1.5;
 }
 
 .overlay-msg .chat-username {
@@ -482,11 +706,12 @@ input:checked + .slider:before { transform: translateX(16px); }
 
 #username-confirm:hover { background: #ff7a2b; }
 
+/* ---- Fullscreen chat panel ---- */
 #watch-chat-fs {
   position: absolute;
   right: 20px;
   top: 20px;
-  width: 260px;
+  width: 320px;
   z-index: 2147483647;
   pointer-events: all;
   font-family: sans-serif;
@@ -500,8 +725,12 @@ input:checked + .slider:before { transform: translateX(16px); }
   display: flex;
   flex-direction: column;
   box-shadow: 0 0 12px rgba(0,0,0,0.7);
-  overflow: hidden;
+  overflow: visible;
 }
+
+/* Clip inner sections for rounded look */
+#chat-header-fs { border-radius: 10px 10px 0 0; overflow: hidden; }
+#chat-input-area-fs { border-radius: 0 0 10px 10px; overflow: hidden; }
 
 #chat-header-fs {
   padding: 8px 10px;
@@ -511,23 +740,34 @@ input:checked + .slider:before { transform: translateX(16px); }
   justify-content: space-between;
   user-select: none;
   cursor: move;
+  gap: 8px;
 }
 
 #chat-title-fs {
   color: #ff640a;
   font-weight: bold;
   font-size: 13px;
+  flex-shrink: 0;
 }
 
-#overlay-control-fs {
+#chat-header-controls-fs {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
+  flex-wrap: nowrap;
 }
 
-#overlay-label-fs {
+#overlay-control-fs, #keylock-control-fs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+#overlay-label-fs, #keylock-label-fs {
   color: #ff640a;
   font-size: 12px;
+  white-space: nowrap;
 }
 
 #chat-messages-fs {
@@ -567,14 +807,15 @@ input:checked + .slider:before { transform: translateX(16px); }
 
 #chat-send-fs:hover { background: #ff7a2b; }
 
+/* ---- Fullscreen overlay mode messages — higher up ---- */
 #chat-messages-fs.fs-overlay-mode {
   position: absolute;
-  bottom: 160px;
+  bottom: 220px;
   right: 20px;
   left: auto;
   top: auto;
-  width: 280px;
-  max-height: 200px;
+  width: 320px;
+  max-height: 210px;
   pointer-events: none;
   background: transparent;
   padding: 0;
@@ -582,8 +823,9 @@ input:checked + .slider:before { transform: translateX(16px); }
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 4px;
+  gap: 6px;
   overflow: hidden;
+  justify-content: flex-end;
 }
 `;
 
@@ -611,12 +853,22 @@ function createChatBoxIfVideoExists(): void {
 <div id="chat-panel">
   <div id="chat-header">
     <span id="chat-title">Horai Chat</span>
-    <div id="overlay-control">
-      <span id="overlay-label">Overlay</span>
-      <label class="overlay-switch">
-        <input type="checkbox" id="overlay-toggle">
-        <span class="slider"></span>
-      </label>
+    <div id="chat-header-controls">
+      <div id="overlay-control">
+        <span id="overlay-label">Overlay</span>
+        <label class="overlay-switch">
+          <input type="checkbox" id="overlay-toggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div id="keylock-control">
+        <span id="keylock-label">Chat Focus</span>
+        <label class="overlay-switch">
+          <input type="checkbox" id="keylock-toggle">
+          <span class="slider"></span>
+        </label>
+        <span id="keylock-tooltip">Chat Focus — redirects all keyboard input to chat</span>
+      </div>
     </div>
   </div>
   <div id="username-input-area">
@@ -657,12 +909,21 @@ function watchFullscreen(chatBox: HTMLElement): void {
 <div id="chat-panel-fs">
   <div id="chat-header-fs">
     <span id="chat-title-fs">💬 Horai Chat</span>
-    <div id="overlay-control-fs">
-      <span id="overlay-label-fs">Overlay</span>
-      <label class="overlay-switch">
-        <input type="checkbox" id="overlay-toggle-fs">
-        <span class="slider"></span>
-      </label>
+    <div id="chat-header-controls-fs">
+      <div id="overlay-control-fs">
+        <span id="overlay-label-fs">Overlay</span>
+        <label class="overlay-switch">
+          <input type="checkbox" id="overlay-toggle-fs">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div id="keylock-control-fs">
+        <span id="keylock-label-fs">Chat Focus</span>
+        <label class="overlay-switch">
+          <input type="checkbox" id="keylock-toggle-fs">
+          <span class="slider"></span>
+        </label>
+      </div>
     </div>
   </div>
   <div id="chat-messages-fs"></div>
@@ -697,13 +958,23 @@ function watchFullscreen(chatBox: HTMLElement): void {
     `;
     fsEl.appendChild(fsIcon);
 
-    const fsInput     = fsChat.querySelector("#chat-input-fs") as HTMLInputElement;
-    const fsSendBtn   = fsChat.querySelector("#chat-send-fs") as HTMLButtonElement;
-    const fsOverlay   = fsChat.querySelector("#overlay-toggle-fs") as HTMLInputElement;
-    const fsHeader    = fsChat.querySelector("#chat-header-fs") as HTMLElement;
-    const fsMsgs      = fsChat.querySelector("#chat-messages-fs") as HTMLElement;
-    const fsPanelEl   = fsChat.querySelector("#chat-panel-fs") as HTMLElement;
-    const fsInputArea = fsChat.querySelector("#chat-input-area-fs") as HTMLElement;
+    const fsInput       = fsChat.querySelector("#chat-input-fs") as HTMLInputElement;
+    const fsSendBtn     = fsChat.querySelector("#chat-send-fs") as HTMLButtonElement;
+    const fsOverlay     = fsChat.querySelector("#overlay-toggle-fs") as HTMLInputElement;
+    const fsKeylockTgl  = fsChat.querySelector("#keylock-toggle-fs") as HTMLInputElement;
+    const fsHeader      = fsChat.querySelector("#chat-header-fs") as HTMLElement;
+    const fsMsgs        = fsChat.querySelector("#chat-messages-fs") as HTMLElement;
+    const fsPanelEl     = fsChat.querySelector("#chat-panel-fs") as HTMLElement;
+    const fsInputArea   = fsChat.querySelector("#chat-input-area-fs") as HTMLElement;
+
+    // Sync fullscreen keylock toggle with global state
+    fsKeylockTgl.checked = g_keyLockEnabled;
+    fsKeylockTgl.addEventListener("change", () => {
+      g_keyLockEnabled = fsKeylockTgl.checked;
+      if (g_keyLockEnabled) {
+        fsInput.focus();
+      }
+    });
 
     let fsHideTimer: ReturnType<typeof setTimeout>;
     let fsOverlayActive = false;
@@ -738,7 +1009,7 @@ function watchFullscreen(chatBox: HTMLElement): void {
     });
 
     fsInput.addEventListener("focus", () => {
-      clearTimeout(fsHideTimer);
+      if (!g_keyLockEnabled) clearTimeout(fsHideTimer);
     });
 
     fsInput.addEventListener("blur", () => {
@@ -752,6 +1023,8 @@ function watchFullscreen(chatBox: HTMLElement): void {
       if (fsOverlayActive) {
         fsMsgs.classList.add("fs-overlay-mode");
         fsEl.appendChild(fsMsgs);
+        // Fix 1: convert pre-existing messages so they also fade out
+        convertExistingToOverlay(fsMsgs);
         fsChat.style.opacity = "1";
         fsChat.style.pointerEvents = "all";
         fsIcon.style.display = "none";
@@ -766,8 +1039,7 @@ function watchFullscreen(chatBox: HTMLElement): void {
         fsChat.style.pointerEvents = "all";
         fsIcon.style.display = "none";
         fsMsgs.querySelectorAll(".overlay-msg").forEach((msg) => {
-          (msg as HTMLElement).style.opacity = "1";
-          msg.classList.remove("overlay-msg");
+          cancelOverlayFade(msg as HTMLElement);
         });
         resetHideTimer();
       }
@@ -782,7 +1054,7 @@ function watchFullscreen(chatBox: HTMLElement): void {
         appendMessage(username, text);
       }
       fsInput.value = "";
-      fsInput.blur();
+      fsInput.focus();
       resetHideTimer();
     }
 
@@ -828,6 +1100,10 @@ function attachChatEvents(chatBox: HTMLElement, icon: HTMLElement): void {
   const sendButton      = chatBox.querySelector("#chat-send") as HTMLButtonElement;
   const header          = chatBox.querySelector("#chat-header") as HTMLElement;
   const overlayToggle   = chatBox.querySelector("#overlay-toggle") as HTMLInputElement;
+  const keylockToggle   = chatBox.querySelector("#keylock-toggle") as HTMLInputElement;
+  const messages        = chatBox.querySelector("#chat-messages") as HTMLElement;
+  const panel           = chatBox.querySelector("#chat-panel") as HTMLElement;
+  let hideTimer: ReturnType<typeof setTimeout>;
 
   icon.addEventListener("click", () => {
     chatBox.classList.toggle("panel-hidden");
@@ -849,6 +1125,18 @@ function attachChatEvents(chatBox: HTMLElement, icon: HTMLElement): void {
     e.stopPropagation();
   });
 
+  // Key lock toggle
+  keylockToggle.addEventListener("change", () => {
+    g_keyLockEnabled = keylockToggle.checked;
+    if (g_keyLockEnabled) {
+      // Just focus the input — panel is allowed to hide naturally via the timer
+      const chatInputArea = chatBox.querySelector("#chat-input-area") as HTMLElement;
+      if (chatInputArea.style.display !== "none") {
+        input.focus();
+      }
+    }
+  });
+
   function sendMessage() {
     const username = chatBox.dataset.username;
     if (!username || !input.value.trim()) return;
@@ -858,14 +1146,26 @@ function attachChatEvents(chatBox: HTMLElement, icon: HTMLElement): void {
       appendMessage(username, text);
     }
     input.value = "";
-    input.blur();
+    input.focus();
   }
 
+  // Expose sendMessage globally so the keydown interceptor can call it
+  // directly when Enter is pressed while the panel is faded.
+  g_sendMessage = sendMessage;
+
   sendButton.addEventListener("click", sendMessage);
+
+  // Fix 1 (Enter in Chat Focus mode): listener on the input in capture phase.
+  // This fires before the global keydown interceptor, so when Enter is pressed
+  // while Chat Focus is on, we handle it here directly regardless of focus state.
   input.addEventListener("keydown", (e) => {
     e.stopPropagation();
-    if (e.key === "Enter") sendMessage();
-  });
+    e.stopImmediatePropagation();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      sendMessage();
+    }
+  }, true);
 
   // Drag
   let offsetX = 0, offsetY = 0, isDragging = false;
@@ -889,48 +1189,75 @@ function attachChatEvents(chatBox: HTMLElement, icon: HTMLElement): void {
 
   document.addEventListener("mouseup", () => { isDragging = false; });
 
+  // Fix 1: Overlay toggle — convert pre-existing messages when turning overlay ON,
+  // and fully restore (cancel timers + reset opacity) when turning it OFF
   overlayToggle.addEventListener("change", () => {
     chatBox.classList.toggle("overlay-mode");
-    if (!overlayToggle.checked) {
-      chatBox.querySelectorAll(".overlay-msg").forEach((msg) => {
-        (msg as HTMLElement).style.opacity = "1";
-        msg.classList.remove("overlay-msg");
-      });
+    if (overlayToggle.checked) {
+      // Overlay ON: cancel hide timer, keep panel visible so input stays accessible
+      clearTimeout(hideTimer);
+      if (panel) {
+        panel.style.opacity = "1";
+        panel.style.pointerEvents = "all";
+      }
+      convertExistingToOverlay(messages);
+    } else {
+      // Overlay OFF: restore messages, restart normal hide behaviour
+      restoreOverlayMessages(messages);
+      startHideTimer();
     }
   });
 
-  const panel = chatBox.querySelector("#chat-panel") as HTMLElement;
-  let hideTimer: ReturnType<typeof setTimeout>;
+  // Fix 2/3/4: Hide/show logic
+  // - Hovering chatbox: show panel, cancel timer
+  // - Clicking video (anywhere outside chatbox): start 5s hide timer
+  // - Typing in input: cancel timer, keep panel visible
+  // - Key lock ON: never hide
 
   function startHideTimer() {
+    // Don't hide if overlay mode is active (input must stay reachable)
+    // Chat Focus mode CAN hide visually — but input must stay keyboard-accessible
+    if (chatBox.classList.contains("overlay-mode")) return;
     clearTimeout(hideTimer);
     hideTimer = setTimeout(() => {
       if (panel) {
         panel.style.opacity = "0";
+        // Keep pointerEvents on so input stays focusable and keyboard-accessible.
+        // Only mouse interaction is blocked by opacity:0 visually.
+        // We set panel pointerEvents none but keep input itself interactive.
         panel.style.pointerEvents = "none";
+        // Override: keep the input itself pointer-accessible for keyboard routing
+        input.style.pointerEvents = "all";
       }
-    }, 4000);
+    }, 5000);
   }
 
-  chatBox.addEventListener("mouseenter", () => {
+  function revealPanel() {
+    clearTimeout(hideTimer);
     if (panel) {
       panel.style.opacity = "1";
       panel.style.pointerEvents = "all";
+      input.style.pointerEvents = "";
     }
-    clearTimeout(hideTimer);
+  }
+
+  // Show on hover over chatbox or icon
+  chatBox.addEventListener("mouseenter", revealPanel);
+  icon.addEventListener("mouseenter", revealPanel);
+
+  // Fix 4: clicking outside chatbox (i.e. the video) starts hide timer
+  document.addEventListener("mousedown", (e) => {
+    const target = e.target as Node;
+    if (!chatBox.contains(target) && target !== icon) {
+      startHideTimer();
+    }
   });
 
-  chatBox.addEventListener("mouseleave", startHideTimer);
-
-  icon.addEventListener("mouseenter", () => {
-    if (panel) {
-      panel.style.opacity = "1";
-      panel.style.pointerEvents = "all";
-    }
-    clearTimeout(hideTimer);
+  // While input is focused, keep panel visible — UNLESS Chat Focus is on
+  // (in that case panel is intentionally allowed to stay faded while typing)
+  input.addEventListener("focus", () => {
+    if (!g_keyLockEnabled) revealPanel();
   });
-
-  icon.addEventListener("mouseleave", startHideTimer);
 
   startHideTimer();
 }
