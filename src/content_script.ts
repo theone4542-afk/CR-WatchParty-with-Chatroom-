@@ -502,7 +502,7 @@ style.textContent = `
 }
 
 /* Clip inner sections so the panel still looks rounded */
-#chat-header { border-radius: 10px 10px 0 0; overflow: hidden; }
+#chat-header { border-radius: 10px 10px 0 0; overflow: visible; }
 #chat-messages { border-radius: 0; }
 #chat-input-area { border-radius: 0 0 10px 10px; overflow: hidden; }
 
@@ -545,6 +545,7 @@ style.textContent = `
 #keylock-control {
   position: relative;
   cursor: default;
+  z-index: 2147483647;
 }
 
 #keylock-tooltip {
