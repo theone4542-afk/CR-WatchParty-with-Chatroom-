@@ -26,18 +26,51 @@ let g_keyLockEnabled = false;
 // global keydown interceptor can call it directly when Enter is pressed
 // while the panel is faded and input isn't yet focused.
 let g_sendMessage: (() => void) | null = null;
+let g_sendFromFs: (() => void) | null = null;
 document.addEventListener("keydown", (e: KeyboardEvent) => {
   if (!g_keyLockEnabled) return;
 
   const chatBox = document.getElementById("watch-chat");
   if (!chatBox) return;
 
+  const inFullscreen = !!document.fullscreenElement;
+
+  // ---- FULLSCREEN path ----
+  if (inFullscreen) {
+    const fsInput = document.getElementById("chat-input-fs") as HTMLInputElement | null;
+    const fsFocused = fsInput && document.activeElement === fsInput;
+    if (fsFocused) {
+      if (e.key === "Enter") {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+        if (g_sendFromFs) g_sendFromFs();
+        return;
+      }
+      e.stopImmediatePropagation();
+      return;
+    }
+    // Not focused — route key to fsInput
+    if (fsInput) {
+      if (e.key === "Enter") {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+        fsInput.focus();
+        if (g_sendFromFs) g_sendFromFs();
+        return;
+      }
+      fsInput.focus();
+    }
+    e.stopImmediatePropagation();
+    return;
+  }
+
+  // ---- NORMAL (non-fullscreen) path ----
   const chatInput = document.getElementById("chat-input") as HTMLInputElement | null;
   const inputFocused = chatInput && document.activeElement === chatInput;
+  const inOverlay = chatBox.classList.contains("overlay-mode");
+  const panel = chatBox.querySelector("#chat-panel") as HTMLElement | null;
+  const panelFaded = panel && panel.style.opacity === "0";
 
-  // Input already focused — block Crunchyroll's bubble-phase listeners
-  // but do NOT stopImmediatePropagation — the input's own capture listener
-  // needs to fire next to handle Enter → sendMessage.
   if (inputFocused) {
     if (e.key === "Enter") {
       e.stopImmediatePropagation();
@@ -45,27 +78,31 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
       if (g_sendMessage) g_sendMessage();
       return;
     }
-    e.stopPropagation();
+    e.stopImmediatePropagation();
     return;
   }
 
-  // Reveal if panel-hidden (icon mode) — but NOT if just faded by hide timer
+  // Reveal if fully hidden (icon mode)
   if (chatBox.classList.contains("panel-hidden")) {
     chatBox.classList.remove("panel-hidden");
   }
 
-  // Route all keys to input silently without revealing the panel.
-  // For Enter: call sendMessage directly since input may not be truly focused yet.
-  if (chatInput && !chatBox.classList.contains("overlay-mode")) {
+  if (chatInput) {
     if (e.key === "Enter") {
       e.stopImmediatePropagation();
       e.preventDefault();
       chatInput.focus();
-      // Call sendMessage directly — don't rely on input's keydown listener
-      // since activeElement may not be the input yet at this point.
       if (g_sendMessage) g_sendMessage();
       return;
     }
+
+    // Non-overlay: reveal panel when user starts typing so they can see what they type
+    if (!inOverlay && panelFaded && panel) {
+      panel.style.opacity = "1";
+      panel.style.pointerEvents = "all";
+      if (chatInput) chatInput.style.pointerEvents = "";
+    }
+
     chatInput.focus();
   }
 
@@ -513,7 +550,7 @@ style.textContent = `
 #keylock-tooltip {
   display: none;
   position: absolute;
-  bottom: calc(100% + 8px);
+  top: calc(100% + 8px);
   right: 0;
   background: #333;
   color: #fff;
@@ -529,10 +566,10 @@ style.textContent = `
 #keylock-tooltip::after {
   content: "";
   position: absolute;
-  top: 100%;
+  bottom: 100%;
   right: 10px;
   border: 5px solid transparent;
-  border-top-color: #333;
+  border-bottom-color: #333;
 }
 
 #keylock-control:hover #keylock-tooltip {
@@ -1058,11 +1095,17 @@ function watchFullscreen(chatBox: HTMLElement): void {
       resetHideTimer();
     }
 
+    g_sendFromFs = sendFromFs;
+
     fsSendBtn.addEventListener("click", sendFromFs);
     fsInput.addEventListener("keydown", (e) => {
       e.stopPropagation();
-      if (e.key === "Enter") sendFromFs();
-    });
+      e.stopImmediatePropagation();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        sendFromFs();
+      }
+    }, true);
 
     // Drag
     let fsDragging = false, fsOffX = 0, fsOffY = 0;
@@ -1125,15 +1168,24 @@ function attachChatEvents(chatBox: HTMLElement, icon: HTMLElement): void {
     e.stopPropagation();
   });
 
-  // Key lock toggle
+  // Key lock toggle — hides panel immediately and blocks all keys from Crunchyroll
   keylockToggle.addEventListener("change", () => {
     g_keyLockEnabled = keylockToggle.checked;
     if (g_keyLockEnabled) {
-      // Just focus the input — panel is allowed to hide naturally via the timer
+      // Hide panel immediately — all keys now go to chat
+      if (panel) {
+        panel.style.opacity = "0";
+        panel.style.pointerEvents = "none";
+        input.style.pointerEvents = "all";
+      }
       const chatInputArea = chatBox.querySelector("#chat-input-area") as HTMLElement;
       if (chatInputArea.style.display !== "none") {
         input.focus();
       }
+    } else {
+      // Turning off — reveal panel and restart normal hide timer
+      revealPanel();
+      startHideTimer();
     }
   });
 
@@ -1194,15 +1246,14 @@ function attachChatEvents(chatBox: HTMLElement, icon: HTMLElement): void {
   overlayToggle.addEventListener("change", () => {
     chatBox.classList.toggle("overlay-mode");
     if (overlayToggle.checked) {
-      // Overlay ON: cancel hide timer, keep panel visible so input stays accessible
-      clearTimeout(hideTimer);
-      if (panel) {
-        panel.style.opacity = "1";
-        panel.style.pointerEvents = "all";
-      }
+      // Move messages to body so panel opacity:0 doesn't hide them
+      document.body.appendChild(messages);
       convertExistingToOverlay(messages);
+      startHideTimer();
     } else {
-      // Overlay OFF: restore messages, restart normal hide behaviour
+      // Put messages back inside panel before the input area
+      const inputArea = chatBox.querySelector("#chat-input-area") as HTMLElement;
+      panel.insertBefore(messages, inputArea);
       restoreOverlayMessages(messages);
       startHideTimer();
     }
@@ -1215,18 +1266,11 @@ function attachChatEvents(chatBox: HTMLElement, icon: HTMLElement): void {
   // - Key lock ON: never hide
 
   function startHideTimer() {
-    // Don't hide if overlay mode is active (input must stay reachable)
-    // Chat Focus mode CAN hide visually — but input must stay keyboard-accessible
-    if (chatBox.classList.contains("overlay-mode")) return;
     clearTimeout(hideTimer);
     hideTimer = setTimeout(() => {
       if (panel) {
         panel.style.opacity = "0";
-        // Keep pointerEvents on so input stays focusable and keyboard-accessible.
-        // Only mouse interaction is blocked by opacity:0 visually.
-        // We set panel pointerEvents none but keep input itself interactive.
         panel.style.pointerEvents = "none";
-        // Override: keep the input itself pointer-accessible for keyboard routing
         input.style.pointerEvents = "all";
       }
     }, 5000);
