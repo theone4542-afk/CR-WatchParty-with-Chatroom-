@@ -16,6 +16,9 @@ let currentRoom = "default-room";
 
 ws.onopen = () => {
   console.log("Connected to Horai chat server");
+  // FIX: Auto-join the room immediately on connect so we receive messages
+  // from others even before the user has entered a username.
+  ws.send(JSON.stringify({ type: "join", room: currentRoom, username: null }));
 };
 
 // ---------------- Key Lock State ---------------- //
@@ -248,6 +251,11 @@ ws.onmessage = (event) => {
   if (msg.type === "leave" && msg.username) {
     appendMessage(null, `${msg.username} left the chat`, true);
   }
+
+  // FIX: Handle video action notifications from other users with their actual username
+  if (msg.type === "video_action") {
+    notifyVideoAction(msg.action, msg.progress, true, msg.username);
+  }
 };
 
 ws.onerror = (err) => console.error("WebSocket error:", err);
@@ -263,15 +271,30 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function notifyVideoAction(action: "play" | "pause" | "seek", progress: number, isRemote: boolean): void {
+// FIX: Added optional remoteUsername param so remote actions show the real username.
+// Local actions are also broadcast over WebSocket so others see who did it.
+function notifyVideoAction(action: "play" | "pause" | "seek", progress: number, isRemote: boolean, remoteUsername?: string): void {
   const chatBox = document.getElementById("watch-chat");
-  const username = isRemote ? "Someone" : (chatBox?.dataset.username || "You");
+  const username = isRemote ? (remoteUsername || "Someone") : (chatBox?.dataset.username || "You");
   const time = formatTime(progress);
   let text = "";
   if (action === "play")  text = `▶ ${username} resumed at ${time}`;
   if (action === "pause") text = `⏸ ${username} paused at ${time}`;
   if (action === "seek")  text = `⏩ ${username} jumped to ${time}`;
   if (text) appendMessage(null, text, true);
+
+  // Broadcast local actions to all others so they can display the username
+  if (!isRemote && ws.readyState === WebSocket.OPEN) {
+    const localUsername = chatBox?.dataset.username;
+    if (localUsername) {
+      ws.send(JSON.stringify({
+        type: "video_action",
+        action,
+        progress,
+        username: localUsername
+      }));
+    }
+  }
 }
 
 // ---------------- Video Sync ---------------- //
@@ -377,17 +400,19 @@ function handleRemoteUpdate(message: Message): void {
 
   if (Math.abs(roomProgress - currentProgress) > LIMIT_DELTA_TIME) {
     triggerAction(Actions.TIME_UPDATE, roomProgress);
-    notifyVideoAction("seek", roomProgress, true);
+    // NOTE: Don't call notifyVideoAction here for remote — the video_action
+    // WebSocket message from the sender's client will handle the notification
+    // with the correct username. Calling it here would show "Someone" anyway.
   }
 
   if (state !== roomState) {
     if (roomState === States.PAUSED) {
       triggerAction(Actions.PAUSE, roomProgress);
-      notifyVideoAction("pause", roomProgress, true);
+      // Same as above — notification comes via video_action WebSocket message
     }
     if (roomState === States.PLAYING) {
       triggerAction(Actions.PLAY, roomProgress);
-      notifyVideoAction("play", roomProgress, true);
+      // Same as above
     }
   }
 }
@@ -1160,6 +1185,8 @@ function attachChatEvents(chatBox: HTMLElement, icon: HTMLElement): void {
     usernameArea.style.display = "none";
     (chatBox.querySelector("#chat-input-area") as HTMLElement).style.display = "flex";
 
+    // FIX: Re-send join with the real username now that we have it.
+    // The server will update currentUsername and broadcast the join notification.
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "join", room: currentRoom, username }));
     }

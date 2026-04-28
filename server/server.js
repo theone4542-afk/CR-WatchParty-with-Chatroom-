@@ -12,16 +12,24 @@ wss.on("connection", (ws) => {
     const msg = JSON.parse(data);
 
     if (msg.type === "join") {
+      // If already in a room, remove from it first
+      if (currentRoom && rooms[currentRoom]) {
+        rooms[currentRoom] = rooms[currentRoom].filter(c => c !== ws);
+      }
+
       currentRoom = msg.room;
-      currentUsername = msg.username;
+      currentUsername = msg.username || null;
 
       if (!rooms[currentRoom]) {
         rooms[currentRoom] = [];
       }
 
-      rooms[currentRoom].push(ws);
+      // Add to room only if not already present
+      if (!rooms[currentRoom].includes(ws)) {
+        rooms[currentRoom].push(ws);
+      }
 
-      // Broadcast join notification to everyone EXCEPT the sender
+      // Only broadcast join notification if they actually have a username
       if (msg.username) {
         rooms[currentRoom].forEach(client => {
           if (client !== ws && client.readyState === WebSocket.OPEN) {
@@ -37,9 +45,8 @@ wss.on("connection", (ws) => {
     }
 
     if (msg.type === "chat") {
-      if (!rooms[currentRoom]) return;
+      if (!currentRoom || !rooms[currentRoom]) return;
 
-      // Broadcast to everyone EXCEPT the sender, and forward username + sessionId
       rooms[currentRoom].forEach(client => {
         if (client !== ws && client.readyState === WebSocket.OPEN) {
           client.send(JSON.stringify({
@@ -50,13 +57,32 @@ wss.on("connection", (ws) => {
           }));
         }
       });
+
+      return;
+    }
+
+    // FIX: Broadcast video play/pause/seek actions with the username who triggered it
+    if (msg.type === "video_action") {
+      if (!currentRoom || !rooms[currentRoom]) return;
+
+      rooms[currentRoom].forEach(client => {
+        if (client !== ws && client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({
+            type: "video_action",
+            action: msg.action,
+            progress: msg.progress,
+            username: msg.username
+          }));
+        }
+      });
+
+      return;
     }
   });
 
   ws.on("close", () => {
     if (!currentRoom) return;
 
-    // Broadcast leave notification to everyone remaining
     if (currentUsername && rooms[currentRoom]) {
       rooms[currentRoom].forEach(client => {
         if (client !== ws && client.readyState === WebSocket.OPEN) {
@@ -68,7 +94,9 @@ wss.on("connection", (ws) => {
       });
     }
 
-    rooms[currentRoom] = rooms[currentRoom].filter(c => c !== ws);
+    if (rooms[currentRoom]) {
+      rooms[currentRoom] = rooms[currentRoom].filter(c => c !== ws);
+    }
   });
 });
 
