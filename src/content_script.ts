@@ -11,7 +11,7 @@ import {
 import { extensionAPI } from "./browser-compat";
 
 // ---------------- WebSocket ---------------- //
-const ws = new WebSocket("wss://cr-watchparty-with-chatroom-production.up.railway.app");
+const ws = new WebSocket("wss://cr-watchparty-with-chatroom.onrender.com");
 let currentRoom = "default-room";
 
 ws.onopen = () => {
@@ -440,7 +440,7 @@ function runContentScript(): void {
     g_port.onMessage.addListener(handleServiceWorkerMessage);
   }
 
-  const player = document.getElementById("player0") as HTMLVideoElement;
+  const player = document.querySelector("video") as HTMLVideoElement;
 
   if (!player) {
     setTimeout(runContentScript, 500);
@@ -872,7 +872,7 @@ document.head.appendChild(style);
 // ---------------- ChatBox ---------------- //
 
 function createChatBoxIfVideoExists(): void {
-  const player = document.getElementById("player0") as HTMLVideoElement;
+  const player = document.querySelector("video") as HTMLVideoElement;
   if (!player) {
     setTimeout(createChatBoxIfVideoExists, 500);
     return;

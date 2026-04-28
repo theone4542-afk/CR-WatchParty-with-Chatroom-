@@ -23,7 +23,7 @@
     "*://www.crunchyroll.com/*",
     "*://static.crunchyroll.com/*",
     "*://rt-sync.azurewebsites.net/*",
-    "*://cr-watchparty-with-chatroom-production.up.railway.app/*"
+    "*://cr-watchparty-with-chatroom.onrender.com/*"
   ],
   "action": {
     "default_popup": "popup.html",
