@@ -11,15 +11,42 @@ import {
 import { extensionAPI } from "./browser-compat";
 
 // ---------------- WebSocket ---------------- //
-const ws = new WebSocket("wss://cr-watchparty-with-chatroom.onrender.com");
 let currentRoom = "default-room";
 
-ws.onopen = () => {
-  console.log("Connected to Horai chat server");
-  // FIX: Auto-join the room immediately on connect so we receive messages
-  // from others even before the user has entered a username.
-  ws.send(JSON.stringify({ type: "join", room: currentRoom, username: null }));
-};
+// Queue for messages that couldn't be sent yet (server waking up / reconnecting)
+let g_messageQueue: string[] = [];
+
+// Create WebSocket with auto-reconnect and queue drain
+function createWs(): WebSocket {
+  const socket = new WebSocket("wss://cr-watchparty-with-chatroom.onrender.com");
+
+  socket.onopen = () => {
+    console.log("Connected to Horai chat server");
+    // Re-join room if we had one (handles reconnects)
+    const chatBox = document.getElementById("watch-chat");
+    const username = chatBox?.dataset.username;
+    if (username && currentRoom) {
+      socket.send(JSON.stringify({ type: "join", room: currentRoom, username }));
+    }
+    // Drain queued messages
+    while (g_messageQueue.length > 0) {
+      socket.send(g_messageQueue.shift()!);
+    }
+  };
+
+  socket.onclose = () => {
+    console.log("Disconnected from chat server, reconnecting in 3s...");
+    setTimeout(() => { ws = createWs(); attachWsHandlers(ws); }, 3000);
+  };
+
+  socket.onerror = (err) => {
+    console.error("WebSocket error:", err);
+  };
+
+  return socket;
+}
+
+let ws = createWs();
 
 // ---------------- Key Lock State ---------------- //
 // When true, all keyboard events are captured by the chat and NOT passed to Crunchyroll.
@@ -30,6 +57,7 @@ let g_keyLockEnabled = false;
 // while the panel is faded and input isn't yet focused.
 let g_sendMessage: (() => void) | null = null;
 let g_sendFromFs: (() => void) | null = null;
+let g_remoteUsername: string = "Someone";
 document.addEventListener("keydown", (e: KeyboardEvent) => {
   if (!g_keyLockEnabled) return;
 
@@ -237,29 +265,27 @@ function appendMessage(username: string | null, text: string, isSystem = false):
   });
 }
 
-ws.onmessage = (event) => {
-  const msg = JSON.parse(event.data);
+function attachWsHandlers(socket: WebSocket): void {
+  socket.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
 
-  if (msg.type === "chat") {
-    appendMessage(msg.username ?? null, msg.text);
-  }
+    if (msg.type === "chat") {
+      appendMessage(msg.username ?? null, msg.text);
+    }
 
-  if (msg.type === "join" && msg.username) {
-    appendMessage(null, `${msg.username} joined the chat`, true);
-  }
+    if (msg.type === "join" && msg.username) {
+      g_remoteUsername = msg.username;
+      appendMessage(null, `${msg.username} joined the chat`, true);
+    }
 
-  if (msg.type === "leave" && msg.username) {
-    appendMessage(null, `${msg.username} left the chat`, true);
-  }
+    if (msg.type === "leave" && msg.username) {
+      appendMessage(null, `${msg.username} left the chat`, true);
+    }
+  };
+}
+attachWsHandlers(ws);
 
-  // FIX: Handle video action notifications from other users with their actual username
-  if (msg.type === "video_action") {
-    notifyVideoAction(msg.action, msg.progress, true, msg.username);
-  }
-};
-
-ws.onerror = (err) => console.error("WebSocket error:", err);
-ws.onclose = () => console.log("Disconnected from chat server");
+// onclose and onerror are handled inside createWs()
 
 // ---------------- Video Action Chat Notifications ---------------- //
 // Notify the chat when someone plays, pauses, or seeks.
@@ -271,30 +297,15 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-// FIX: Added optional remoteUsername param so remote actions show the real username.
-// Local actions are also broadcast over WebSocket so others see who did it.
-function notifyVideoAction(action: "play" | "pause" | "seek", progress: number, isRemote: boolean, remoteUsername?: string): void {
+function notifyVideoAction(action: "play" | "pause" | "seek", progress: number, isRemote: boolean): void {
   const chatBox = document.getElementById("watch-chat");
-  const username = isRemote ? (remoteUsername || "Someone") : (chatBox?.dataset.username || "You");
+  const username = isRemote ? "Someone" : (chatBox?.dataset.username || "You");
   const time = formatTime(progress);
   let text = "";
   if (action === "play")  text = `▶ ${username} resumed at ${time}`;
   if (action === "pause") text = `⏸ ${username} paused at ${time}`;
   if (action === "seek")  text = `⏩ ${username} jumped to ${time}`;
   if (text) appendMessage(null, text, true);
-
-  // Broadcast local actions to all others so they can display the username
-  if (!isRemote && ws.readyState === WebSocket.OPEN) {
-    const localUsername = chatBox?.dataset.username;
-    if (localUsername) {
-      ws.send(JSON.stringify({
-        type: "video_action",
-        action,
-        progress,
-        username: localUsername
-      }));
-    }
-  }
 }
 
 // ---------------- Video Sync ---------------- //
@@ -400,19 +411,17 @@ function handleRemoteUpdate(message: Message): void {
 
   if (Math.abs(roomProgress - currentProgress) > LIMIT_DELTA_TIME) {
     triggerAction(Actions.TIME_UPDATE, roomProgress);
-    // NOTE: Don't call notifyVideoAction here for remote — the video_action
-    // WebSocket message from the sender's client will handle the notification
-    // with the correct username. Calling it here would show "Someone" anyway.
+    notifyVideoAction("seek", roomProgress, true);
   }
 
   if (state !== roomState) {
     if (roomState === States.PAUSED) {
       triggerAction(Actions.PAUSE, roomProgress);
-      // Same as above — notification comes via video_action WebSocket message
+      notifyVideoAction("pause", roomProgress, true);
     }
     if (roomState === States.PLAYING) {
       triggerAction(Actions.PLAY, roomProgress);
-      // Same as above
+      notifyVideoAction("play", roomProgress, true);
     }
   }
 }
@@ -896,7 +905,14 @@ document.head.appendChild(style);
 
 // ---------------- ChatBox ---------------- //
 
+function isEpisodePage(): boolean {
+  return window.location.pathname.startsWith("/watch/");
+}
+
 function createChatBoxIfVideoExists(): void {
+  // Only inject on episode pages e.g. crunchyroll.com/watch/...
+  if (!isEpisodePage()) return;
+
   const player = document.querySelector("video") as HTMLVideoElement;
   if (!player) {
     setTimeout(createChatBoxIfVideoExists, 500);
@@ -1113,7 +1129,8 @@ function watchFullscreen(chatBox: HTMLElement): void {
       if (!username || !fsInput.value.trim()) return;
       const text = fsInput.value.trim();
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "chat", text, username }));
+        const msg2 = JSON.stringify({ type: "chat", text, username });
+        if (ws.readyState === WebSocket.OPEN) { ws.send(msg2); } else { g_messageQueue.push(msg2); }
         appendMessage(username, text);
       }
       fsInput.value = "";
@@ -1185,10 +1202,11 @@ function attachChatEvents(chatBox: HTMLElement, icon: HTMLElement): void {
     usernameArea.style.display = "none";
     (chatBox.querySelector("#chat-input-area") as HTMLElement).style.display = "flex";
 
-    // FIX: Re-send join with the real username now that we have it.
-    // The server will update currentUsername and broadcast the join notification.
+    const joinMsg = JSON.stringify({ type: "join", room: currentRoom, username });
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "join", room: currentRoom, username }));
+      ws.send(joinMsg);
+    } else {
+      g_messageQueue.push(joinMsg);
     }
   });
 
@@ -1221,9 +1239,12 @@ function attachChatEvents(chatBox: HTMLElement, icon: HTMLElement): void {
     const username = chatBox.dataset.username;
     if (!username || !input.value.trim()) return;
     const text = input.value.trim();
+    appendMessage(username, text);
+    const chatMsg = JSON.stringify({ type: "chat", text, username });
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "chat", text, username }));
-      appendMessage(username, text);
+      ws.send(chatMsg);
+    } else {
+      g_messageQueue.push(chatMsg);
     }
     input.value = "";
     input.focus();
