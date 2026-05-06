@@ -101,6 +101,17 @@ function appendMessage(username: string | null, text: string, isSystem = false):
   }, MESSAGE_FADE_SECONDS * 1000);
 }
 
+function notifyVideoAction(action: "play" | "pause" | "seek", progress: number, isRemote: boolean): void {
+  const chatBox = document.getElementById("watch-chat");
+  const username = isRemote ? "Someone" : (chatBox?.dataset.username || "You");
+  const time = formatTime(progress);
+  let text = "";
+  if (action === "play")  text = `▶ ${username} resumed at ${time}`;
+  if (action === "pause") text = `⏸ ${username} paused at ${time}`;
+  if (action === "seek")  text = `⏩ ${username} jumped to ${time}`;
+  if (text) appendMessage(null, text, true);
+}
+
 // ---------------- WebSocket Handlers ---------------- //
 
 function attachWsHandlers(socket: WebSocket): void {
@@ -164,10 +175,12 @@ const handleLocalAction = (action: Actions) => (): void => {
     case Actions.PLAY:
     case Actions.PAUSE:
       try { g_port.postMessage({ type, state, currentProgress }); } catch(e) {}
+      notifyVideoAction(action === Actions.PLAY ? "play" : "pause", currentProgress, false);
       break;
     case Actions.TIME_UPDATE:
       if (timeJump) {
         try { g_port.postMessage({ type, state, currentProgress }); } catch(e) {}
+        notifyVideoAction("seek", currentProgress, false);
       }
       break;
   }
@@ -205,11 +218,18 @@ function handleRemoteUpdate(message: Message): void {
 
   if (Math.abs(roomProgress - currentProgress) > LIMIT_DELTA_TIME) {
     triggerAction(Actions.TIME_UPDATE, roomProgress);
+    notifyVideoAction("seek", roomProgress, true);
   }
 
   if (state !== roomState) {
-    if (roomState === States.PAUSED) triggerAction(Actions.PAUSE, roomProgress);
-    if (roomState === States.PLAYING) triggerAction(Actions.PLAY, roomProgress);
+    if (roomState === States.PAUSED) {
+      triggerAction(Actions.PAUSE, roomProgress);
+      notifyVideoAction("pause", roomProgress, true);
+    }
+    if (roomState === States.PLAYING) {
+      triggerAction(Actions.PLAY, roomProgress);
+      notifyVideoAction("play", roomProgress, true);
+    }
   }
 }
 
@@ -391,7 +411,6 @@ function setupChatInteractions(chatBox: HTMLElement) {
     if (!username) return;
     chatBox.dataset.username = username;
     userArea.style.display = "none";
-    // We don't show inputArea yet — only when Enter is pressed
     
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "join", room: currentRoom, username }));
@@ -403,17 +422,14 @@ function setupChatInteractions(chatBox: HTMLElement) {
   // Global Enter-to-Type Listener
   window.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
-      // If not logged in, don't do anything
       if (!chatBox.dataset.username) return;
 
       if (document.activeElement !== chatInput) {
-        // Not focused -> Show input and Focus it
         e.preventDefault();
         e.stopImmediatePropagation();
         inputArea.style.display = "flex";
         chatInput.focus();
       } else {
-        // Focused -> Send, Hide & Blur
         const text = chatInput.value.trim();
         if (text) {
           const username = chatBox.dataset.username;
