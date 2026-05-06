@@ -62,6 +62,7 @@ let ws = createWs();
 
 // ---------------- State ---------------- //
 const MESSAGE_FADE_SECONDS = 7;
+let g_archiveVisible = false;
 
 // ---------------- UI Helpers ---------------- //
 
@@ -73,31 +74,50 @@ function formatTime(seconds: number): string {
 
 function appendMessage(username: string | null, text: string, isSystem = false): void {
   const messages = document.getElementById("chat-messages");
-  if (!messages) return;
+  const archive = document.getElementById("chat-logs-archive");
+  if (!messages || !archive) return;
 
-  const div = document.createElement("div");
+  // 1. Add to HUD (Fading)
+  const divHUD = document.createElement("div");
+  const divArchive = document.createElement("div");
+
   if (isSystem) {
-    div.className = "system-msg hudi-msg";
-    div.textContent = text;
+    divHUD.className = "system-msg hudi-msg";
+    divHUD.textContent = text;
+    
+    divArchive.className = "system-msg archive-entry";
+    divArchive.textContent = text;
   } else {
-    div.className = "chat-msg hudi-msg";
+    divHUD.className = "chat-msg hudi-msg";
+    divArchive.className = "chat-msg archive-entry";
+
     if (username) {
-      const nameSpan = document.createElement("span");
-      nameSpan.className = "chat-username";
-      nameSpan.textContent = username + ": ";
-      div.appendChild(nameSpan);
+      const nameHUD = document.createElement("span");
+      nameHUD.className = "chat-username";
+      nameHUD.textContent = username + ": ";
+      divHUD.appendChild(nameHUD);
+
+      const nameArchive = document.createElement("span");
+      nameArchive.className = "chat-username";
+      nameArchive.textContent = username + ": ";
+      divArchive.appendChild(nameArchive);
     }
-    div.appendChild(document.createTextNode(text));
+    divHUD.appendChild(document.createTextNode(text));
+    divArchive.appendChild(document.createTextNode(text));
   }
 
-  messages.appendChild(div);
+  // Append to HUD
+  messages.appendChild(divHUD);
   messages.scrollTop = messages.scrollHeight;
 
-  // Individual Message Fade (Syncplay style)
+  // Append to Archive (Persistent)
+  archive.appendChild(divArchive);
+  archive.scrollTop = archive.scrollHeight;
+
+  // Individual Message Fade for HUD only
   setTimeout(() => {
-    div.classList.add("msg-fade-out");
-    // Optionally remove from DOM after transition
-    setTimeout(() => div.remove(), 1000);
+    divHUD.classList.add("msg-fade-out");
+    setTimeout(() => divHUD.remove(), 1000);
   }, MESSAGE_FADE_SECONDS * 1000);
 }
 
@@ -274,7 +294,7 @@ style.textContent = `
   display: flex;
   flex-direction: column;
   font-family: 'Roboto', sans-serif;
-  pointer-events: none; /* Let clicks pass through to video unless focused */
+  pointer-events: none;
 }
 
 #chat-messages {
@@ -299,6 +319,37 @@ style.textContent = `
 
 .msg-fade-out {
   opacity: 0;
+}
+
+/* ARCHIVE LOGS (Persistent) */
+#chat-logs-archive {
+  position: fixed;
+  right: 20px;
+  top: 50px;
+  bottom: 50px;
+  width: 350px;
+  background: rgba(10, 10, 10, 0.95);
+  border-left: 3px solid #ff640a;
+  z-index: 2147483640;
+  display: none;
+  flex-direction: column;
+  padding: 15px;
+  overflow-y: auto;
+  font-family: 'Roboto', sans-serif;
+  color: white;
+  box-shadow: -5px 0 15px rgba(0,0,0,0.5);
+  scrollbar-width: thin;
+  scrollbar-color: #ff640a transparent;
+  pointer-events: all;
+}
+
+.archive-entry {
+  margin-bottom: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  word-wrap: break-word;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  padding-bottom: 4px;
 }
 
 .chat-msg { line-height: 1.4; word-wrap: break-word; }
@@ -332,7 +383,6 @@ style.textContent = `
   font-family: 'Roboto', sans-serif;
 }
 
-/* Username area still needs a bit of a box to be readable */
 #username-area {
   background: rgba(15, 15, 15, 0.9);
   padding: 20px;
@@ -361,8 +411,6 @@ style.textContent = `
   border-radius: 4px;
   cursor: pointer;
 }
-
-#chat-header { display: none; } /* No more header box */
 `;
 
 document.head.appendChild(style);
@@ -392,6 +440,9 @@ function createChatBoxIfVideoExists(): void {
       <span id="chat-prompt">_</span>
       <input id="chat-input" placeholder="Type here...">
     </div>
+    <div id="chat-logs-archive">
+      <div style="color:#ff640a;font-weight:bold;margin-bottom:10px;border-bottom:1px solid #ff640a">Message History</div>
+    </div>
   `;
 
   document.body.appendChild(chatBox);
@@ -404,8 +455,8 @@ function setupChatInteractions(chatBox: HTMLElement) {
   const userConfirm = document.getElementById("username-confirm-btn")!;
   const inputArea = document.getElementById("chat-input-area")!;
   const chatInput = document.getElementById("chat-input") as HTMLInputElement;
+  const archive = document.getElementById("chat-logs-archive")!;
 
-  // Handle Username Join
   userConfirm.onclick = () => {
     const username = userInput.value.trim();
     if (!username) return;
@@ -419,8 +470,16 @@ function setupChatInteractions(chatBox: HTMLElement) {
 
   userInput.addEventListener("keydown", (e) => e.stopPropagation());
 
-  // Global Enter-to-Type Listener
+  // Global Key Listeners
   window.addEventListener("keydown", (e) => {
+    // 1. Shift Key - Toggle Logs (Archive)
+    // Only if not typing and not in fullscreen
+    if (e.key === "Shift" && document.activeElement !== chatInput && !document.fullscreenElement) {
+      g_archiveVisible = !g_archiveVisible;
+      archive.style.display = g_archiveVisible ? "flex" : "none";
+    }
+
+    // 2. Enter Key - Toggle Input/Send
     if (e.key === "Enter") {
       if (!chatBox.dataset.username) return;
 
@@ -447,11 +506,14 @@ function setupChatInteractions(chatBox: HTMLElement) {
     }
   }, true);
 
-  // Fullscreen support: Move chatbox into the video container
+  // Fullscreen support
   document.addEventListener("fullscreenchange", () => {
     const fsEl = document.fullscreenElement;
     if (fsEl) {
       fsEl.appendChild(chatBox);
+      // Hide archive in fullscreen as requested
+      archive.style.display = "none";
+      g_archiveVisible = false;
     } else {
       document.body.appendChild(chatBox);
     }
