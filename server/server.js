@@ -11,6 +11,10 @@ wss.on("connection", (ws) => {
   ws.on("message", (data) => {
     const msg = JSON.parse(data);
 
+    if (msg.type === "ping") {
+      return;
+    }
+
     if (msg.type === "join") {
       // If already in a room, remove from it first
       if (currentRoom && rooms[currentRoom]) {
